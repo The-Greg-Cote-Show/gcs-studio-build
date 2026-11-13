@@ -22,9 +22,24 @@ CREATE TABLE IF NOT EXISTS items (
   created_at   INTEGER NOT NULL,          -- milliseconds since 1970
   updated_at   INTEGER NOT NULL,          -- also the version check for edits
   archived_at  INTEGER,
-  archived_by  INTEGER REFERENCES people(id)
+  archived_by  INTEGER REFERENCES people(id),
+  due_date     TEXT,                      -- YYYY-MM-DD, optional
+  archive_reason TEXT                     -- 'archived' or 'deleted'
 );
 CREATE INDEX IF NOT EXISTS items_archived ON items (archived_at);
+-- Note: the Worker adds due_date and archive_reason to older databases on its own.
+
+-- Change log. One row per change, written by the Worker.
+CREATE TABLE IF NOT EXISTS activity (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  at            INTEGER NOT NULL,
+  person_id     INTEGER NOT NULL,
+  item_id       INTEGER,
+  item_title    TEXT,
+  action        TEXT    NOT NULL,
+  details_json  TEXT    NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS activity_item ON activity (item_id, id);
 
 CREATE TABLE IF NOT EXISTS fields (
   id            TEXT    PRIMARY KEY,
