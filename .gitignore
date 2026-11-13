@@ -1,0 +1,10 @@
+# Never commit these. They hold hashes or private links.
+seed.sql
+*.seed.sql
+PRIVATE_LINKS*
+*.links.txt
+
+# Local Worker testing
+.wrangler/
+.dev.vars
+node_modules/
