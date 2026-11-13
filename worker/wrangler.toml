@@ -4,6 +4,8 @@ name = "gcs-studio-build-api"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 workers_dev = true
+# No extra preview copies of the API. One live address only.
+preview_urls = false
 
 [vars]
 # Where the front end lives. Only this site may call the API from a browser.
