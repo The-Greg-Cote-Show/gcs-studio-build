@@ -8,6 +8,9 @@
   var LS_KEY = 'gcs_studio_key';
   var LS_COLLAPSED = 'gcs_studio_collapsed';
   var DESKTOP = window.matchMedia('(min-width: 900px) and (pointer: fine)');
+  var TOUCH = 'ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0;
+  var DELETE_TITLE = 'Are you sure you want to delete this?';
+  var DELETE_BODY = 'Deleted items will be temporarily stored in the archive. If you have deleted something in error, please contact Yeti to have it restored.';
 
   var MSG = {
     offline: "Can't reach the board right now. Check your internet and try again.",
@@ -49,6 +52,7 @@
     view: 'board',
     adminTab: 'people',
     archived: null,
+    hist: { entries: null, more: false, loading: false },
     sig: '',
     renderPending: false,
     dragging: false,
@@ -243,7 +247,8 @@
     state.items = data.items || [];
     if (force || !app.querySelector('.top')) return render();
     if (!changed) return;
-    if (state.view !== 'board') return; // admin screen redraws itself
+    if (state.view === 'admin') return; // admin screen redraws itself
+    if (state.view === 'history') return loadHistory(true);
     if (isBusy()) state.renderPending = true;
     else render();
   }
@@ -291,6 +296,39 @@
     if (isNaN(d)) return s;
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function localDate(s) {
+    var p = String(s).split('-');
+    return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  }
+  function todayStr() {
+    var d = new Date();
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+  function shortDate(s) {
+    var d = localDate(s);
+    if (isNaN(d)) return s;
+    var opts = { weekday: 'short', month: 'short', day: 'numeric' };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
+  }
+  function doneStatus() {
+    return state.statuses.length ? state.statuses[state.statuses.length - 1].id : 'installed';
+  }
+
+  // Where an item stands against its due date.
+  // kind: overdue, soon (next 7 days), later, none (no date), done (installed).
+  function dueInfo(it) {
+    if (it.status === doneStatus()) return { kind: 'done', text: it.due ? 'Due ' + shortDate(it.due) : '' };
+    if (!it.due) return { kind: 'none', text: '' };
+    var days = Math.round((localDate(it.due) - localDate(todayStr())) / 86400000);
+    if (days < 0) return { kind: 'overdue', text: 'Overdue: was due ' + shortDate(it.due) };
+    if (days === 0) return { kind: 'soon', text: 'Due today' };
+    if (days === 1) return { kind: 'soon', text: 'Due tomorrow' };
+    if (days <= 7) return { kind: 'soon', text: 'Due ' + shortDate(it.due) + ' (' + days + ' days)' };
+    return { kind: 'later', text: 'Due ' + shortDate(it.due) };
+  }
+
   function linkText(url) {
     try {
       var u = new URL(url);
@@ -334,6 +372,8 @@
     var main = h('main', { id: 'main' });
     app.appendChild(main);
     if (state.view === 'admin' && state.me.role === 'admin') renderAdmin(main);
+    else if (state.view === 'dash') renderDash(main);
+    else if (state.view === 'history') renderHistory(main);
     else {
       state.view = 'board';
       renderBoard(main);
@@ -344,13 +384,33 @@
 
   function renderTop() {
     var isAdmin = state.me.role === 'admin';
-    return h('header', { class: 'top' },
+    var frag = document.createDocumentFragment();
+    frag.appendChild(h('header', { class: 'top' },
       h('div', { class: 'brand', text: 'GCS Studio Build' }),
       h('div', { class: 'hello', text: 'Hi ' + state.me.name }),
-      isAdmin && state.view === 'board'
+      isAdmin && state.view !== 'admin'
         ? h('button', { class: 'btn', type: 'button', onclick: function () { openAdmin('people'); }, text: 'Admin' })
         : null
-    );
+    ));
+    if (state.view !== 'admin') {
+      var views = [['board', 'Board'], ['dash', 'Dashboard'], ['history', 'History']];
+      frag.appendChild(h('nav', { class: 'nav', 'aria-label': 'Views' }, views.map(function (v) {
+        return h('button', {
+          class: 'btn', type: 'button', text: v[1], 'aria-pressed': state.view === v[0] ? 'true' : 'false',
+          onclick: function () { setView(v[0]); },
+        });
+      })));
+    }
+    return frag;
+  }
+
+  function setView(v) {
+    if (state.view === v) return;
+    state.view = v;
+    render();
+    window.scrollTo(0, 0);
+    if (v === 'history') loadHistory(true);
+    else { state.lastRefresh = 0; refresh(); }
   }
 
   function showBanner(text) {
@@ -375,6 +435,7 @@
         h('button', { class: 'btn btn-primary', type: 'button', onclick: function () { openEditor(null); }, text: '+ Add an item' })
       )
     );
+    if (TOUCH) main.appendChild(h('p', { class: 'drag-tip', text: 'Tip: press and hold a card, then drag it to another section.' }));
     var board = h('div', { class: 'board', id: 'board' });
     state.statuses.forEach(function (st) {
       var items = state.items.filter(function (it) { return it.status === st.id; });
@@ -430,12 +491,18 @@
       meta += ' ' + ago(it.createdAt) + '.';
     }
 
+    var due = dueInfo(it);
     var card = h('article', {
       class: 'card' + (state.savingIds[it.id] ? ' saving' : ''),
       'data-status': it.status,
       'data-id': String(it.id),
     },
+      h('button', {
+        class: 'card-trash', type: 'button', 'aria-label': 'Delete ' + it.title, title: 'Delete',
+        onclick: function () { askDelete(it.id, it.title); },
+      }, trashIcon()),
       h('h3', { class: 'card-title', text: it.title }),
+      due.text ? h('div', { class: 'due due-' + due.kind, text: due.text }) : null,
       it.note ? h('p', { class: 'card-note', text: it.note }) : null,
       fieldRows.length ? h('dl', { class: 'card-fields' }, fieldRows) : null,
       h('label', { class: 'status-pick' }, h('span', { class: 'label', text: 'Status' }), select),
@@ -445,7 +512,125 @@
       )
     );
     wireDrag(card, it.id);
+    wireTouchDrag(card, it.id);
     return card;
+  }
+
+  function trashIcon() {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    ['M3 6h18', 'M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2', 'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6', 'M10 11v6', 'M14 11v6']
+      .forEach(function (d) {
+        var p = document.createElementNS(NS, 'path');
+        p.setAttribute('d', d);
+        svg.appendChild(p);
+      });
+    return svg;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phone and tablet drag: press and hold a card, then drag it.
+  // A quick swipe still scrolls the page like normal.
+  // -------------------------------------------------------------------------
+  function wireTouchDrag(card, id) {
+    if (!TOUCH) return;
+    var HOLD_MS = 350;
+    var timer = null, active = false, ghost = null, overCol = null, raf = null;
+    var sx = 0, sy = 0, x = 0, y = 0, offX = 0, offY = 0;
+
+    card.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 1 || state.savingIds[id]) return;
+      if (e.target.closest && e.target.closest('select, input, textarea, button, a')) return;
+      sx = x = e.touches[0].clientX;
+      sy = y = e.touches[0].clientY;
+      timer = setTimeout(begin, HOLD_MS);
+    }, { passive: true });
+
+    card.addEventListener('touchmove', function (e) {
+      x = e.touches[0].clientX;
+      y = e.touches[0].clientY;
+      if (!active) {
+        if (timer && (Math.abs(x - sx) > 10 || Math.abs(y - sy) > 10)) { clearTimeout(timer); timer = null; }
+        return;
+      }
+      e.preventDefault(); // dragging, so don't scroll the page
+      place();
+    }, { passive: false });
+
+    card.addEventListener('touchend', function (e) {
+      if (!active) { clearTimeout(timer); timer = null; return; }
+      e.preventDefault(); // no tap after a drag
+      var target = overCol ? overCol.getAttribute('data-status') : null;
+      finish();
+      var it = findItem(id);
+      if (it && target && it.status !== target) changeStatus(id, target);
+      else if (state.renderPending) render();
+    });
+    card.addEventListener('touchcancel', function () {
+      clearTimeout(timer); timer = null;
+      if (active) { finish(); if (state.renderPending) render(); }
+    });
+    // Stop the long-press menu from popping up while holding a card.
+    card.addEventListener('contextmenu', function (e) { if (timer || active) e.preventDefault(); });
+
+    function begin() {
+      timer = null;
+      active = true;
+      state.dragging = true;
+      blurActive();
+      var r = card.getBoundingClientRect();
+      offX = sx - r.left;
+      offY = sy - r.top;
+      ghost = card.cloneNode(true);
+      ghost.classList.add('drag-ghost');
+      ghost.style.width = r.width + 'px';
+      document.body.appendChild(ghost);
+      card.classList.add('lifted');
+      if (navigator.vibrate) { try { navigator.vibrate(15); } catch (er) { /* fine */ } }
+      place();
+      raf = setInterval(tick, 16);
+    }
+
+    function place() {
+      if (!ghost) return;
+      ghost.style.left = (x - offX) + 'px';
+      ghost.style.top = (y - offY) + 'px';
+      var el = document.elementFromPoint(x, y);
+      var col = el && el.closest ? el.closest('.col') : null;
+      if (col !== overCol) {
+        if (overCol) overCol.classList.remove('drop-target');
+        overCol = col;
+        if (overCol) overCol.classList.add('drop-target');
+      }
+    }
+
+    // Scroll the page when the finger is near the top or bottom edge.
+    function tick() {
+      if (!active) return;
+      var edge = 90, speed = 0;
+      if (y < edge) speed = -Math.ceil((edge - y) / 6);
+      else if (y > window.innerHeight - edge) speed = Math.ceil((y - (window.innerHeight - edge)) / 6);
+      if (speed) { window.scrollBy(0, speed); place(); }
+    }
+
+    function finish() {
+      active = false;
+      state.dragging = false;
+      if (raf) clearInterval(raf);
+      raf = null;
+      if (ghost) ghost.remove();
+      ghost = null;
+      card.classList.remove('lifted');
+      if (overCol) overCol.classList.remove('drop-target');
+      overCol = null;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -576,6 +761,8 @@
     var noteIn = h('textarea', { maxlength: '5000', placeholder: 'Anything worth remembering' });
     var statusIn = h('select');
     state.statuses.forEach(function (st) { statusIn.appendChild(h('option', { value: st.id, text: st.label })); });
+    var dueIn = h('input', { type: 'date', 'aria-label': 'Due date' });
+    var dueClear = h('button', { class: 'btn', type: 'button', text: 'Clear', onclick: function () { dueIn.value = ''; } });
 
     var inputs = visibleFields().map(function (f) { return makeFieldInput(f); });
     var saveBtn = h('button', { class: 'btn btn-primary', type: 'submit', text: item ? 'Save' : 'Add it' });
@@ -584,6 +771,7 @@
       titleIn.value = src ? src.title : '';
       noteIn.value = src ? src.note : '';
       statusIn.value = src ? src.status : state.statuses[0].id;
+      dueIn.value = (src && src.due) || '';
       inputs.forEach(function (fi) { fi.set(src ? src.custom[fi.field.id] : undefined); });
     }
     fill(item);
@@ -619,7 +807,7 @@
       });
       if (bad) return;
 
-      var body = { title: title, note: noteIn.value, status: statusIn.value, custom: custom };
+      var body = { title: title, note: noteIn.value, status: statusIn.value, due: dueIn.value || null, custom: custom };
       saving = true;
       saveBtn.disabled = true;
       saveBtn.textContent = 'Saving...';
@@ -674,6 +862,10 @@
       h('label', { class: 'field' }, h('span', { class: 'label', text: 'What is it?' }), titleIn, titleErr),
       h('label', { class: 'field' }, h('span', { class: 'label', text: 'Notes' }), noteIn),
       h('label', { class: 'field' }, h('span', { class: 'label', text: 'Status' }), statusIn),
+      h('div', { class: 'field' },
+        h('span', { class: 'label', text: 'Due date (optional)' }),
+        h('div', { class: 'date-row' }, dueIn, dueClear)
+      ),
       inputs.map(function (fi) { return fi.el; }),
       h('div', { class: 'sheet-actions' },
         saveBtn,
@@ -682,12 +874,54 @@
       item
         ? h('div', { class: 'sheet-extra' },
             h('p', { class: 'sheet-meta', text: 'Added by ' + personName(item.createdBy) + ' ' + ago(item.createdAt) + '. Last changed by ' + personName(item.updatedBy) + ' ' + ago(item.updatedAt) + '.' }),
-            h('button', { class: 'btn btn-danger btn-wide', type: 'button', onclick: function () { archive(item.id, item.title); }, text: 'Archive (take it off the board)' })
+            h('button', { class: 'btn btn-danger btn-wide', type: 'button', onclick: function () { archive(item.id, item.title); }, text: 'Archive (take it off the board)' }),
+            itemHistory(item.id)
           )
         : null
     );
     openOverlay(form, null);
     if (!item) setTimeout(function () { titleIn.focus(); }, 50);
+  }
+
+  // The change log for one item, shown at the bottom of its edit screen.
+  function itemHistory(id) {
+    var box = h('div', { class: 'item-hist' }, h('h3', { text: 'History' }), h('p', { class: 'loading', text: 'Loading...' }));
+    api('GET', '/api/activity?item=' + id + '&limit=50').then(
+      function (data) {
+        while (box.childNodes.length > 1) box.removeChild(box.lastChild);
+        if (!data.entries.length) {
+          box.appendChild(h('p', { class: 'empty', text: 'No changes logged yet.' }));
+          return;
+        }
+        data.entries.forEach(function (e) {
+          box.appendChild(entryRow(e, true, dayLabel(e.at) + ', ' + timeLabel(e.at)));
+        });
+      },
+      function () {
+        while (box.childNodes.length > 1) box.removeChild(box.lastChild);
+        box.appendChild(h('p', { class: 'empty', text: "Couldn't load the history right now." }));
+      }
+    );
+    return box;
+  }
+
+  // -------------------------------------------------------------------------
+  // Delete (trash can on each card). Goes to the archive, marked "Deleted".
+  // -------------------------------------------------------------------------
+  function askDelete(id, title) {
+    confirmBox(DELETE_TITLE, DELETE_BODY, 'Delete', function () {
+      api('POST', '/api/items/' + id + '/delete').then(
+        function () {
+          removeItem(id);
+          render();
+          toast('Deleted "' + title + '".');
+        },
+        function (err) {
+          if (err.code === 'gone' || err.code === 'not_found') { removeItem(id); render(); }
+          toast(friendly(err));
+        }
+      );
+    }, true);
   }
 
   // One input per custom field. get() returns { value } or { error: true }.
@@ -829,12 +1063,12 @@
   // -------------------------------------------------------------------------
   // Small dialogs (instead of browser pop-ups)
   // -------------------------------------------------------------------------
-  function confirmBox(title, body, okLabel, onOk) {
+  function confirmBox(title, body, okLabel, onOk, danger) {
     var box = h('div', { class: 'sheet dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
       h('h2', { text: title }),
       h('p', { text: body }),
       h('div', { class: 'sheet-actions' },
-        h('button', { class: 'btn btn-primary', type: 'button', text: okLabel, onclick: function () { closeOverlays(); onOk(); } }),
+        h('button', { class: 'btn ' + (danger ? 'btn-solid-danger' : 'btn-primary'), type: 'button', text: okLabel, onclick: function () { closeOverlays(); onOk(); } }),
         h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: closeOverlays })
       )
     );
@@ -1097,14 +1331,16 @@
   }
 
   function adminArchived(body) {
-    body.appendChild(h('p', { text: 'Archived items are off the board but kept here. Bring one back if it was archived by mistake.' }));
+    body.appendChild(h('p', { text: 'Archived and deleted items are off the board but kept here. Bring one back if it went by mistake.' }));
     if (state.archived === null) return body.appendChild(h('p', { class: 'loading', text: 'Loading...' }));
-    if (!state.archived.length) return body.appendChild(h('p', { class: 'empty', text: 'Nothing archived.' }));
+    if (!state.archived.length) return body.appendChild(h('p', { class: 'empty', text: 'Nothing archived or deleted.' }));
     state.archived.forEach(function (it) {
+      var deleted = it.archiveReason === 'deleted';
       body.appendChild(h('div', { class: 'row' },
         h('div', { class: 'row-main' },
+          h('span', { class: 'tag' + (deleted ? ' tag-deleted' : ''), text: deleted ? 'Deleted' : 'Archived' }),
           h('strong', { text: it.title }),
-          h('span', { text: statusLabel(it.status) + '. Archived by ' + personName(it.archivedBy) + ' ' + ago(it.archivedAt) + '.' })
+          h('span', { text: statusLabel(it.status) + '. ' + (deleted ? 'Deleted' : 'Archived') + ' by ' + personName(it.archivedBy) + ' ' + ago(it.archivedAt) + '.' })
         ),
         h('div', { class: 'row-btns' },
           h('button', {
@@ -1125,6 +1361,237 @@
         )
       ));
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Dashboard: counts per status, and how they stand against due dates
+  // -------------------------------------------------------------------------
+  var DUE_KINDS = [
+    ['overdue', 'Overdue'],
+    ['soon', 'Due in 7 days'],
+    ['later', 'Due later'],
+    ['none', 'No due date'],
+  ];
+
+  function renderDash(main) {
+    var done = doneStatus();
+    var counts = { overdue: 0, soon: 0, later: 0, none: 0, done: 0 };
+    var byStatus = {};
+    state.statuses.forEach(function (st) { byStatus[st.id] = { total: 0, overdue: 0, soon: 0, later: 0, none: 0 }; });
+    state.items.forEach(function (it) {
+      var k = dueInfo(it).kind;
+      counts[k]++;
+      var b = byStatus[it.status];
+      if (!b) return;
+      b.total++;
+      if (k !== 'done') b[k]++;
+    });
+    var open = state.items.length - counts.done;
+
+    var wrap = h('div', { class: 'dash' }, h('h2', { text: 'Dashboard' }));
+    wrap.appendChild(h('div', { class: 'tiles' },
+      tile(counts.overdue, 'Overdue', 'k-overdue'),
+      tile(counts.soon, 'Due in 7 days', 'k-soon'),
+      tile(open, 'Still to do', null),
+      tile(counts.done, statusLabel(done), 'k-done')
+    ));
+
+    wrap.appendChild(h('h3', { text: 'By status' }));
+    wrap.appendChild(h('div', { class: 'legend' }, DUE_KINDS.map(function (d) {
+      return h('span', { class: 'k-' + d[0], text: d[1] });
+    })));
+    state.statuses.forEach(function (st) {
+      var b = byStatus[st.id];
+      var row = h('div', { class: 'srow', 'data-status': st.id },
+        h('div', { class: 'srow-head' },
+          h('strong', { text: st.label }),
+          h('span', { class: 'total', text: String(b.total) })
+        )
+      );
+      if (st.id === done) {
+        row.appendChild(h('div', { class: 'srow-nums' }, h('span', { class: 'k-done' }, h('b', { text: String(b.total) }), ' done')));
+      } else if (!b.total) {
+        row.appendChild(h('div', { class: 'srow-nums' }, h('span', { text: 'Nothing here' })));
+      } else {
+        var bar = h('div', { class: 'bar', role: 'img', 'aria-label': DUE_KINDS.map(function (d) { return d[1] + ': ' + b[d[0]]; }).join(', ') });
+        var nums = h('div', { class: 'srow-nums' });
+        DUE_KINDS.forEach(function (d) {
+          if (!b[d[0]]) return;
+          bar.appendChild(h('span', { class: 'k-' + d[0], style: 'flex:' + b[d[0]], title: d[1] + ': ' + b[d[0]] }));
+          nums.appendChild(h('span', { class: 'k-' + d[0] }, h('b', { text: String(b[d[0]]) }), ' ' + d[1].toLowerCase()));
+        });
+        row.appendChild(bar);
+        row.appendChild(nums);
+      }
+      wrap.appendChild(row);
+    });
+
+    dueList(wrap, 'Overdue', 'overdue', 'Nothing overdue. Nice.');
+    dueList(wrap, 'Due in the next 7 days', 'soon', 'Nothing due this week.');
+    main.appendChild(wrap);
+  }
+
+  function tile(n, label, k) {
+    return h('div', { class: 'tile' + (k ? ' ' + k : '') },
+      h('div', { class: 'num', text: String(n) }),
+      h('div', { class: 'what', text: label })
+    );
+  }
+
+  function dueList(wrap, title, kind, emptyText) {
+    var list = state.items
+      .filter(function (it) { return dueInfo(it).kind === kind; })
+      .sort(function (a, b) { return a.due < b.due ? -1 : a.due > b.due ? 1 : 0; });
+    wrap.appendChild(h('h3', { text: title }));
+    if (!list.length) return wrap.appendChild(h('p', { class: 'empty', text: emptyText }));
+    wrap.appendChild(h('div', { class: 'dlist' }, list.map(function (it) {
+      return h('button', { class: 'row', type: 'button', onclick: function () { openEditor(it.id); } },
+        h('div', { class: 'row-main' },
+          h('strong', { text: it.title }),
+          h('span', { text: dueInfo(it).text + '. ' + statusLabel(it.status) + '.' })
+        )
+      );
+    })));
+  }
+
+  // -------------------------------------------------------------------------
+  // History: the full change log, newest first
+  // -------------------------------------------------------------------------
+  function loadHistory(reset) {
+    var hs = state.hist;
+    if (hs.loading) return;
+    var before = !reset && hs.entries && hs.entries.length ? hs.entries[hs.entries.length - 1].id : null;
+    if (reset && !hs.entries) render();
+    hs.loading = true;
+    api('GET', '/api/activity?limit=60' + (before ? '&before=' + before : '')).then(
+      function (data) {
+        hs.loading = false;
+        if (reset) {
+          var topOld = hs.entries && hs.entries[0] ? hs.entries[0].id : null;
+          var topNew = data.entries[0] ? data.entries[0].id : null;
+          if (hs.entries && topOld === topNew) return; // nothing new
+          hs.entries = data.entries;
+        } else {
+          hs.entries = hs.entries.concat(data.entries);
+        }
+        hs.more = data.more;
+        if (state.view === 'history') render();
+      },
+      function (err) {
+        hs.loading = false;
+        if (!hs.entries) hs.entries = [];
+        if (state.view === 'history') { render(); toast(friendly(err)); }
+      }
+    );
+  }
+
+  function renderHistory(main) {
+    var hs = state.hist;
+    var wrap = h('div', { class: 'hist' }, h('h2', { text: 'History' }),
+      h('p', { class: 'sheet-meta', text: 'Every change anyone makes, newest first.' }));
+    if (!hs.entries) {
+      wrap.appendChild(h('p', { class: 'loading', text: 'Loading...' }));
+    } else if (!hs.entries.length) {
+      wrap.appendChild(h('p', { class: 'empty', text: 'Nothing logged yet. Changes show up here from now on.' }));
+    } else {
+      var lastDay = null;
+      hs.entries.forEach(function (e) {
+        var day = dayLabel(e.at);
+        if (day !== lastDay) { wrap.appendChild(h('h3', { class: 'day', text: day })); lastDay = day; }
+        wrap.appendChild(entryRow(e, false, timeLabel(e.at)));
+      });
+      if (hs.more) {
+        wrap.appendChild(h('button', {
+          class: 'btn btn-wide', type: 'button', text: 'Show older changes', style: 'margin-top:16px',
+          onclick: function () { this.disabled = true; this.textContent = 'Loading...'; loadHistory(false); },
+        }));
+      }
+    }
+    main.appendChild(wrap);
+  }
+
+  function dayLabel(ms) {
+    var d = new Date(ms);
+    var today = new Date();
+    var y = new Date(); y.setDate(y.getDate() - 1);
+    if (d.toDateString() === today.toDateString()) return 'Today';
+    if (d.toDateString() === y.toDateString()) return 'Yesterday';
+    var opts = { weekday: 'long', month: 'short', day: 'numeric' };
+    if (d.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
+  }
+  function timeLabel(ms) {
+    return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+
+  // A logged value, written for people.
+  function logValue(t, v) {
+    if (v === null || v === undefined || v === '') return 'blank';
+    switch (t) {
+      case 'price': return money(v);
+      case 'number': return Number(v).toLocaleString();
+      case 'date': return shortDate(v);
+      case 'checkbox': return v ? 'yes' : 'no';
+      case 'person': return personName(Number(v));
+      case 'link': return linkText(String(v));
+      default: {
+        var s = String(v);
+        return s.length > 80 ? s.slice(0, 80) + '...' : s;
+      }
+    }
+  }
+
+  // One line in the change log. inItem: shown inside that item, so say "it".
+  function entryRow(e, inItem, when) {
+    var who = h('b', { text: personName(e.by) });
+    var thing = inItem ? 'it' : h('b', { text: e.itemTitle || 'an item' });
+    var ch = e.changes || [];
+    var first = ch[0] || {};
+    var line;
+    var list = null;
+
+    switch (e.action) {
+      case 'added': {
+        line = [who, ' added ', thing];
+        var bits = ch.map(function (c) { return c.t === 'status' ? 'in ' + c.b : c.f.toLowerCase() + ' ' + logValue(c.t, c.b); });
+        if (bits.length) line.push(' (' + bits.join(', ') + ')');
+        break;
+      }
+      case 'edited':
+        if (ch.length === 1 && first.t === 'status') {
+          line = [who, ' moved ', thing, ' from ' + first.a + ' to ' + first.b];
+        } else if (ch.length === 1 && first.t === 'note') {
+          line = [who, ' edited the notes on ', thing];
+        } else if (ch.length === 1 && first.f === 'Name') {
+          line = [who, ' renamed ' + (inItem ? 'it' : '"' + first.a + '"') + ' to ', h('b', { text: first.b })];
+        } else {
+          line = [who, ' changed ', thing];
+          list = ch.map(function (c) {
+            if (c.t === 'note') return 'Edited the notes';
+            if (c.a === null || c.a === undefined) return c.f + ': set to ' + logValue(c.t, c.b);
+            if (c.b === null || c.b === undefined) return c.f + ': cleared (was ' + logValue(c.t, c.a) + ')';
+            return c.f + ': ' + logValue(c.t, c.a) + ' → ' + logValue(c.t, c.b);
+          });
+        }
+        break;
+      case 'archived': line = [who, ' archived ', thing]; break;
+      case 'deleted': line = [who, ' deleted ', thing]; break;
+      case 'restored':
+        line = [who, ' brought back ', thing, first.a === 'deleted' ? ' (it had been deleted)' : ''];
+        break;
+      case 'field_added': line = [who, ' added a new field: ', h('b', { text: first.f })]; break;
+      case 'field_renamed': line = [who, ' renamed the field "' + first.a + '" to ', h('b', { text: first.b })]; break;
+      case 'field_hidden': line = [who, ' hid the field ', h('b', { text: first.f })]; break;
+      case 'field_shown': line = [who, ' showed the field ', h('b', { text: first.f }), ' again']; break;
+      case 'field_choices': line = [who, ' changed the choices for ', h('b', { text: first.f }), ' to ' + first.b]; break;
+      case 'new_link': line = [who, ' made a new private link for ' + first.b]; break;
+      default: line = [who, ' made a change'];
+    }
+
+    return h('div', { class: 'entry' + (e.action === 'deleted' ? ' entry-del' : '') },
+      h('div', { class: 'when', text: when }),
+      h('div', { class: 'what' }, line, list ? h('ul', null, list.map(function (t) { return h('li', { text: t }); })) : null)
+    );
   }
 
   // -------------------------------------------------------------------------
