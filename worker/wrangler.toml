@@ -1,0 +1,19 @@
+# GCS Studio Build API
+# The Worker name in the Cloudflare dashboard must match "name" below.
+name = "gcs-studio-build-api"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+# Where the front end lives. Only this site may call the API from a browser.
+ALLOWED_ORIGINS = "https://the-greg-cote-show.github.io"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "gcs-studio-build"
+# The Database ID from the D1 dashboard (not a secret).
+database_id = "4d753859-521a-46f1-b7c3-063a206a3de2"
+
+[observability]
+enabled = true
