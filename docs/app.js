@@ -393,7 +393,7 @@
         : null
     ));
     if (state.view !== 'admin') {
-      var views = [['board', 'Board'], ['dash', 'Dashboard'], ['history', 'History']];
+      var views = [['dash', 'Dashboard'], ['board', 'Board'], ['history', 'History']];
       frag.appendChild(h('nav', { class: 'nav', 'aria-label': 'Views' }, views.map(function (v) {
         return h('button', {
           class: 'btn', type: 'button', text: v[1], 'aria-pressed': state.view === v[0] ? 'true' : 'false',
@@ -405,6 +405,11 @@
   }
 
   function setView(v) {
+    // Tapping Board always shows the whole board, even from a filtered view.
+    if (v === 'board' && state.filter) {
+      state.filter = null;
+      if (state.view === 'board') { render(); window.scrollTo(0, 0); return; }
+    }
     if (state.view === v) return;
     state.view = v;
     render();
@@ -435,13 +440,24 @@
         h('button', { class: 'btn btn-primary', type: 'button', onclick: function () { openEditor(null); }, text: '+ Add an item' })
       )
     );
-    if (TOUCH) main.appendChild(h('p', { class: 'drag-tip', text: 'Tip: press and hold a card, then drag it to another section.' }));
+    var f = state.filter;
+    if (f) {
+      var shown = state.items.filter(function (it) { return matchesFilter(it, f); }).length;
+      main.appendChild(h('div', { class: 'filter-bar' },
+        h('p', null, 'Showing: ', h('b', { text: filterName(f) }), ' (' + shown + ')'),
+        h('button', { class: 'btn', type: 'button', text: 'Show everything', onclick: function () { setView('board'); } })
+      ));
+    } else if (TOUCH) {
+      main.appendChild(h('p', { class: 'drag-tip', text: 'Tip: press and hold a card, then drag it to another section.' }));
+    }
     var board = h('div', { class: 'board', id: 'board' });
     state.statuses.forEach(function (st) {
-      var items = state.items.filter(function (it) { return it.status === st.id; });
-      var collapsed = !!state.collapsed[st.id];
+      var items = state.items.filter(function (it) { return it.status === st.id && matchesFilter(it, f); });
+      // In a filtered view, skip sections with nothing to show.
+      if (f && !items.length && f.status !== st.id) return;
+      var collapsed = !f && !!state.collapsed[st.id];
       var body = h('div', { class: 'col-body' });
-      if (!items.length) body.appendChild(h('p', { class: 'empty', text: 'Nothing here yet' }));
+      if (!items.length) body.appendChild(h('p', { class: 'empty', text: f ? 'Nothing matches right now' : 'Nothing here yet' }));
       items.forEach(function (it) { body.appendChild(renderCard(it)); });
 
       var col = h('section', { class: 'col' + (collapsed ? ' collapsed' : ''), 'data-status': st.id },
@@ -465,7 +481,46 @@
       wireDrop(col, st.id);
       board.appendChild(col);
     });
+    if (f && !board.childNodes.length) board.appendChild(h('p', { class: 'empty', text: 'Nothing matches right now.' }));
     main.appendChild(board);
+  }
+
+  // Board filters, set from the dashboard. { kind } and/or { status }.
+  // kind: overdue, soon, later, none, open (anything not installed).
+  var FILTER_NAMES = { overdue: 'Overdue', soon: 'Due in 7 days', later: 'Due later', none: 'No due date', open: 'Still to do' };
+  function matchesFilter(it, f) {
+    if (!f) return true;
+    if (f.status && it.status !== f.status) return false;
+    if (f.kind) {
+      var k = dueInfo(it).kind;
+      if (f.kind === 'open') return k !== 'done';
+      if (k !== f.kind) return false;
+    }
+    return true;
+  }
+  function filterName(f) {
+    var parts = [];
+    if (f.status) parts.push(statusLabel(f.status));
+    if (f.kind) parts.push(f.status ? FILTER_NAMES[f.kind].toLowerCase() : FILTER_NAMES[f.kind]);
+    return parts.join(', ');
+  }
+  function showOnBoard(f) {
+    state.filter = f;
+    state.view = 'board';
+    render();
+    window.scrollTo(0, 0);
+  }
+  // Jump to one card on the full board and make it blink.
+  function showItemOnBoard(it) {
+    state.filter = null;
+    state.view = 'board';
+    if (state.collapsed[it.status]) { state.collapsed[it.status] = false; saveCollapsed(); }
+    render();
+    var el = app.querySelector('.card[data-id="' + it.id + '"]');
+    if (el) {
+      el.scrollIntoView({ block: 'center' });
+      el.classList.add('flash');
+    }
   }
 
   function renderCard(it) {
@@ -1388,12 +1443,13 @@
     });
     var open = state.items.length - counts.done;
 
-    var wrap = h('div', { class: 'dash' }, h('h2', { text: 'Dashboard' }));
+    var wrap = h('div', { class: 'dash' }, h('h2', { text: 'Dashboard' }),
+      h('p', { class: 'sheet-meta', text: 'Tap any box or number to see those items on the board.' }));
     wrap.appendChild(h('div', { class: 'tiles' },
-      tile(counts.overdue, 'Overdue', 'k-overdue'),
-      tile(counts.soon, 'Due in 7 days', 'k-soon'),
-      tile(open, 'Still to do', null),
-      tile(counts.done, statusLabel(done), 'k-done')
+      tile(counts.overdue, 'Overdue', 'k-overdue', { kind: 'overdue' }),
+      tile(counts.soon, 'Due in 7 days', 'k-soon', { kind: 'soon' }),
+      tile(open, 'Still to do', null, { kind: 'open' }),
+      tile(counts.done, statusLabel(done), 'k-done', { status: done })
     ));
 
     wrap.appendChild(h('h3', { text: 'By status' }));
@@ -1403,9 +1459,13 @@
     state.statuses.forEach(function (st) {
       var b = byStatus[st.id];
       var row = h('div', { class: 'srow', 'data-status': st.id },
-        h('div', { class: 'srow-head' },
+        h('button', {
+          class: 'srow-head', type: 'button', 'aria-label': 'Show ' + st.label + ' on the board',
+          onclick: function () { showOnBoard({ status: st.id }); },
+        },
           h('strong', { text: st.label }),
-          h('span', { class: 'total', text: String(b.total) })
+          h('span', { class: 'total', text: String(b.total) }),
+          h('span', { class: 'go', 'aria-hidden': 'true', text: '›' })
         )
       );
       if (st.id === done) {
@@ -1417,8 +1477,15 @@
         var nums = h('div', { class: 'srow-nums' });
         DUE_KINDS.forEach(function (d) {
           if (!b[d[0]]) return;
-          bar.appendChild(h('span', { class: 'k-' + d[0], style: 'flex:' + b[d[0]], title: d[1] + ': ' + b[d[0]] }));
-          nums.appendChild(h('span', { class: 'k-' + d[0] }, h('b', { text: String(b[d[0]]) }), ' ' + d[1].toLowerCase()));
+          var f = { status: st.id, kind: d[0] };
+          bar.appendChild(h('span', {
+            class: 'k-' + d[0], style: 'flex:' + b[d[0]], title: d[1] + ': ' + b[d[0]],
+            onclick: function () { showOnBoard(f); },
+          }));
+          nums.appendChild(h('button', {
+            class: 'num-link k-' + d[0], type: 'button',
+            onclick: function () { showOnBoard(f); },
+          }, h('b', { text: String(b[d[0]]) }), ' ' + d[1].toLowerCase()));
         });
         row.appendChild(bar);
         row.appendChild(nums);
@@ -1431,8 +1498,8 @@
     main.appendChild(wrap);
   }
 
-  function tile(n, label, k) {
-    return h('div', { class: 'tile' + (k ? ' ' + k : '') },
+  function tile(n, label, k, f) {
+    return h('button', { class: 'tile' + (k ? ' ' + k : ''), type: 'button', onclick: function () { showOnBoard(f); } },
       h('div', { class: 'num', text: String(n) }),
       h('div', { class: 'what', text: label })
     );
@@ -1445,7 +1512,7 @@
     wrap.appendChild(h('h3', { text: title }));
     if (!list.length) return wrap.appendChild(h('p', { class: 'empty', text: emptyText }));
     wrap.appendChild(h('div', { class: 'dlist' }, list.map(function (it) {
-      return h('button', { class: 'row', type: 'button', onclick: function () { openEditor(it.id); } },
+      return h('button', { class: 'row', type: 'button', onclick: function () { showItemOnBoard(it); } },
         h('div', { class: 'row-main' },
           h('strong', { text: it.title }),
           h('span', { text: dueInfo(it).text + '. ' + statusLabel(it.status) + '.' })

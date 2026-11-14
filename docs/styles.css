@@ -414,3 +414,30 @@ main { padding: 16px; padding-bottom: 120px; }
 }
 .tag-deleted { border-color: var(--danger); color: var(--danger); }
 .row .row-main .tag { display: inline-block; }
+
+/* ----- Dashboard: everything taps through to the board ----- */
+button.tile { width: 100%; text-align: left; color: var(--text); cursor: pointer; font: inherit; }
+button.tile:hover, button.tile:focus-visible { border-color: var(--gold); }
+button.srow-head {
+  width: 100%; background: none; border: 0; padding: 0; color: var(--text);
+  font: inherit; text-align: left; cursor: pointer; min-height: 44px;
+}
+.srow-head .go { color: var(--muted); font-size: 1.6rem; line-height: 1; }
+button.srow-head:hover strong { color: var(--gold); }
+.bar span { cursor: pointer; }
+.num-link {
+  background: none; border: 0; padding: 6px 0; min-height: 40px;
+  color: var(--muted); font: inherit; cursor: pointer; text-align: left;
+}
+.num-link b { color: var(--text); }
+.num-link:hover { color: var(--text); text-decoration: underline; }
+.num-link::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; background: var(--k); }
+
+/* ----- Board: "Showing: Overdue" bar ----- */
+.filter-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 2px solid var(--gold); background: var(--note-bg);
+  border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px;
+}
+.filter-bar p { margin: 0; flex: 1 1 200px; font-size: 1.15rem; }
+.filter-bar .btn { min-height: 46px; }
