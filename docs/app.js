@@ -49,7 +49,7 @@
     statuses: [],
     fields: [],
     items: [],
-    view: 'board',
+    view: 'dash', // opens on the Dashboard
     adminTab: 'people',
     archived: null,
     hist: { entries: null, more: false, loading: false },
